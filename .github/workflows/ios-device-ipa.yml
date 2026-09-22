@@ -1,0 +1,89 @@
+name: iOS device IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-device-ipa.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          sed -i '' 's/objectVersion = [0-9]*;/objectVersion = 56;/' FreebuffGate.xcodeproj/project.pbxproj
+
+      - name: Build unsigned device archive
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/FreebuffGate.xcarchive" "$RUNNER_TEMP/ipa"
+          xcodebuild \
+            -project FreebuffGate.xcodeproj \
+            -scheme FreebuffGate \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/FreebuffGate.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            archive
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/FreebuffGate.xcarchive/Products/Applications/FreebuffGate.app"
+          test -d "$APP"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry "$GITHUB_WORKSPACE/freebuff-gate.ipa" Payload
+          shasum -a 256 "$GITHUB_WORKSPACE/freebuff-gate.ipa" > "$GITHUB_WORKSPACE/freebuff-gate.ipa.sha256"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebuff-gate-ipa
+          path: |
+            freebuff-gate.ipa
+            freebuff-gate.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish rolling release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view ios-device-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create ios-device-latest \
+              --title "Freebuff Gate iOS device IPA (latest)" \
+              --notes "Unsigned device IPA built from main. Use an iOS signing/sideloading tool such as Sideloadly to sign it with your own Apple ID." \
+              --prerelease \
+              freebuff-gate.ipa \
+              freebuff-gate.ipa.sha256 \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release upload ios-device-latest \
+              freebuff-gate.ipa \
+              freebuff-gate.ipa.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          fi
